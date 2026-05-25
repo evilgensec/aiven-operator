@@ -30,6 +30,7 @@
 - **BREAKING**: Change `KafkaSchema` deletion to perform a hard delete instead of soft delete only.
   The subject is no longer visible in the registry's listing after deletion,
   and re-applying a `KafkaSchema` with the same `subjectName` after deletion starts at version 1.
+- Fix service resources: wait for connection Secret publication before reporting Ready.
 
 ## v0.38.0 - 2026-05-18
 

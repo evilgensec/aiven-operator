@@ -279,6 +279,10 @@ func (r *KafkaSchemaController) lookupVersionForID(
 		schema.Spec.SubjectName,
 	)
 	if err != nil {
+		if isNotFound(err) {
+			return 0, fmt.Errorf("%w: Kafka Schema subject %q not visible in registry yet: %w",
+				errPreconditionNotMet, schema.Spec.SubjectName, err)
+		}
 		return 0, fmt.Errorf("listing Kafka Schema versions: %w", err)
 	}
 

@@ -248,8 +248,6 @@ func (h *genericServiceHandler) get(ctx context.Context, avnGen avngen.Client, o
 		return nil, nil
 	}
 
-	meta.SetStatusCondition(&status.Conditions, getRunningCondition(metav1.ConditionTrue, "CheckRunning", msg))
-
 	if mp, ok := o.(migrationSecretProvider); ok && mp.getMigrationSecretSource() != nil {
 		// Skip polling Aiven once the migration has completed; the status won't
 		// change, and ServiceGetMigrationStatus would 404 on every reconcile.
@@ -269,12 +267,16 @@ func (h *genericServiceHandler) get(ctx context.Context, avnGen avngen.Client, o
 
 	// If service is powered off, we don't need to return a secret
 	if !isPowered {
+		meta.SetStatusCondition(&status.Conditions, getRunningCondition(metav1.ConditionTrue, "CheckRunning", msg))
 		metav1.SetMetaDataAnnotation(o.getObjectMeta(), instanceIsRunningAnnotation, "false")
 		return nil, nil
 	}
 
-	// Service is powered
-	metav1.SetMetaDataAnnotation(o.getObjectMeta(), instanceIsRunningAnnotation, "true")
+	if managed, ok := obj.(v1alpha1.AivenManagedObject); ok && managed.NoSecret() {
+		meta.SetStatusCondition(&status.Conditions, getRunningCondition(metav1.ConditionTrue, "CheckRunning", msg))
+		metav1.SetMetaDataAnnotation(o.getObjectMeta(), instanceIsRunningAnnotation, "true")
+		return nil, nil
+	}
 
 	// Some services get secrets after they are running only,
 	// like ip addresses (hosts)
@@ -287,6 +289,8 @@ func (h *genericServiceHandler) get(ctx context.Context, avnGen avngen.Client, o
 	case serviceTypeKafka, serviceTypePostgreSQL, serviceTypeMySQL:
 		// CA_CERT can be used with these service types only
 	default:
+		meta.SetStatusCondition(&status.Conditions, getRunningCondition(metav1.ConditionTrue, "CheckRunning", msg))
+		metav1.SetMetaDataAnnotation(o.getObjectMeta(), instanceIsRunningAnnotation, "true")
 		return secret, nil
 	}
 
@@ -302,6 +306,8 @@ func (h *genericServiceHandler) get(ctx context.Context, avnGen avngen.Client, o
 		// todo: backward compatibility, remove in future releases
 		secret.StringData["CA_CERT"] = cert
 	}
+	meta.SetStatusCondition(&status.Conditions, getRunningCondition(metav1.ConditionTrue, "CheckRunning", msg))
+	metav1.SetMetaDataAnnotation(o.getObjectMeta(), instanceIsRunningAnnotation, "true")
 	return secret, nil
 }
 

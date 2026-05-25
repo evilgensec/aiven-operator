@@ -9,9 +9,13 @@ import (
 	"github.com/aiven/go-client-codegen/handler/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/aiven/aiven-operator/api/v1alpha1"
+	"github.com/aiven/aiven-operator/controllers"
 )
 
 func getPgReadReplicaYaml(project, masterName, replicaName, cloudName string) string {
@@ -181,6 +185,75 @@ spec:
   userConfig:
     pg_version: "17"
 `, project, pgName, cloudName)
+}
+
+func TestPgReadyRequiresConnectionSecretCredentials(t *testing.T) {
+	t.Parallel()
+	defer recoverPanic(t)
+
+	ctx, cancel := testCtx()
+	defer cancel()
+
+	pgName := randName("secret-ready")
+	secretName := randName("pg-secret")
+	yml, err := loadExampleYaml("postgresql.yaml", map[string]string{
+		"metadata.name":                         pgName,
+		"spec.project":                          cfg.Project,
+		"spec.cloudName":                        cfg.PrimaryCloudName,
+		"spec.connInfoSecretTarget.name":        secretName,
+		"spec.connInfoSecretTarget.prefix":      "REMOVE",
+		"spec.connInfoSecretTarget.annotations": "REMOVE",
+		"spec.connInfoSecretTarget.labels":      "REMOVE",
+		"spec.maintenanceWindowDow":             "REMOVE",
+		"spec.maintenanceWindowTime":            "REMOVE",
+	})
+	require.NoError(t, err)
+	s := NewSession(ctx, k8sClient)
+
+	immutableSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: defaultNamespace,
+		},
+		Immutable: anyPointer(true),
+		Data: map[string][]byte{
+			"placeholder": []byte("immutable"),
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, immutableSecret))
+
+	defer func() {
+		if err := k8sClient.Delete(ctx, immutableSecret); err != nil && !isNotFound(err) {
+			t.Errorf("failed to delete immutable Secret %q: %s", secretName, err)
+		}
+	}()
+	defer s.Destroy(t)
+
+	require.NoError(t, s.Apply(yml))
+
+	pg := new(v1alpha1.PostgreSQL)
+	require.NoError(t, retryForever(ctx, "verify PostgreSQL waits for connection Secret credentials", func() (bool, error) {
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: pgName, Namespace: defaultNamespace}, pg)
+		if err != nil {
+			return isNotFound(err), err
+		}
+
+		if controllers.IsReadyToUse(pg) {
+			return false, fmt.Errorf("PostgreSQL became ready before connection Secret credentials were published")
+		}
+
+		errCond := meta.FindStatusCondition(pg.Status.Conditions, controllers.ConditionTypeError)
+		if pg.Status.State == serviceRunningState && errCond != nil && errCond.Reason == "ConnInfoSecret" {
+			return false, nil
+		}
+
+		return true, nil
+	}))
+
+	secret, err := s.GetSecret(secretName)
+	require.NoError(t, err)
+	require.Empty(t, secret.Data["PGPASSWORD"])
+	require.Empty(t, secret.Data["POSTGRESQL_PASSWORD"])
 }
 
 func TestPgCustomPrefix(t *testing.T) {

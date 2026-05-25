@@ -22,14 +22,17 @@ func TestKafkaConnector(t *testing.T) {
 	defer cancel()
 
 	kafkaName := randName("kafka-service")
+	kafkaSecretName := randName("kafka-secret")
 	osName := randName("opensearch-service")
+	osSecretName := randName("os-secret")
 	topicName := randName("kafka-topic")
 	connectorName := randName("kafka-connector")
 	yml, err := loadExampleYaml("kafkaconnector.yaml", map[string]string{
 		// Kafka
-		"doc[0].metadata.name":  kafkaName,
-		"doc[0].spec.project":   cfg.Project,
-		"doc[0].spec.cloudName": cfg.PrimaryCloudName,
+		"doc[0].metadata.name":                  kafkaName,
+		"doc[0].spec.project":                   cfg.Project,
+		"doc[0].spec.cloudName":                 cfg.PrimaryCloudName,
+		"doc[0].spec.connInfoSecretTarget.name": kafkaSecretName,
 
 		// Kafka Topic
 		"doc[1].metadata.name":    topicName,
@@ -37,15 +40,17 @@ func TestKafkaConnector(t *testing.T) {
 		"doc[1].spec.serviceName": kafkaName,
 
 		// OpenSearch
-		"doc[2].metadata.name":  osName,
-		"doc[2].spec.project":   cfg.Project,
-		"doc[2].spec.cloudName": cfg.PrimaryCloudName,
+		"doc[2].metadata.name":                  osName,
+		"doc[2].spec.project":                   cfg.Project,
+		"doc[2].spec.cloudName":                 cfg.PrimaryCloudName,
+		"doc[2].spec.connInfoSecretTarget.name": osSecretName,
 
 		// Kafka Connector
-		"doc[3].metadata.name":          connectorName,
-		"doc[3].spec.project":           cfg.Project,
-		"doc[3].spec.serviceName":       kafkaName,
-		"doc[3].spec.userConfig.topics": topicName,
+		"doc[3].metadata.name":                    connectorName,
+		"doc[3].spec.project":                     cfg.Project,
+		"doc[3].spec.serviceName":                 kafkaName,
+		"doc[3].spec.userConfig.topics":           topicName,
+		"doc[3].spec.userConfig.'connection.url'": `{{ fromSecret "` + osSecretName + `" "OPENSEARCH_URI" }}`,
 	})
 	require.NoError(t, err)
 	s := NewSession(ctx, k8sClient)

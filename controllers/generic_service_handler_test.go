@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 
@@ -337,6 +338,76 @@ func TestGet_SecretCleanupRunsWhenPoweredOff(t *testing.T) {
 	err = k8s.Get(t.Context(), types.NamespacedName{Name: "creds", Namespace: "default"}, &corev1.Secret{})
 	assert.True(t, apierrors.IsNotFound(err),
 		"migration Secret should have been deleted even though service is powered off, got err: %v", err)
+}
+
+func TestGet_DoesntMarkReadyBeforeConnectionSecretDetails(t *testing.T) {
+	t.Parallel()
+
+	pg := newObjectFromYAML[v1alpha1.PostgreSQL](t, yamlPostgres)
+	avn := avngen.NewMockClient(t)
+	avn.EXPECT().
+		ServiceGet(mock.Anything, pg.Spec.Project, pg.Name, mock.Anything).
+		Return(&service.ServiceGetOut{
+			State: service.ServiceStateTypeRunning,
+			ServiceUriParams: map[string]string{
+				"host":     "pg.example.com",
+				"port":     "5432",
+				"dbname":   "defaultdb",
+				"user":     "avnadmin",
+				"password": "secret",
+				"sslmode":  "require",
+			},
+			ServiceUri: "postgres://avnadmin:secret@pg.example.com:5432/defaultdb?sslmode=require",
+		}, nil).Once()
+	avn.EXPECT().
+		ProjectKmsGetCA(mock.Anything, pg.Spec.Project).
+		Return("", errors.New("kms ca is not ready")).Once()
+
+	h := &genericServiceHandler{
+		fabric: newPostgreSQLAdapterFactory(nil),
+		log:    logr.Discard(),
+	}
+
+	secret, err := h.get(t.Context(), avn, pg)
+	require.Error(t, err)
+	require.Nil(t, secret)
+	require.False(t, hasIsRunningAnnotation(pg))
+	require.False(t, meta.IsStatusConditionTrue(pg.Status.Conditions, conditionTypeRunning))
+}
+
+func TestGet_MarksNoSecretServiceReadyWhenRunning(t *testing.T) {
+	t.Parallel()
+
+	kafkaConnect := &v1alpha1.KafkaConnect{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "kafka-connect",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.KafkaConnectSpec{
+			BaseServiceFields: v1alpha1.BaseServiceFields{
+				ProjectDependant: v1alpha1.ProjectDependant{
+					ProjectField: v1alpha1.ProjectField{Project: "project"},
+				},
+			},
+		},
+	}
+
+	avn := avngen.NewMockClient(t)
+	avn.EXPECT().
+		ServiceGet(mock.Anything, kafkaConnect.Spec.Project, kafkaConnect.Name, mock.Anything).
+		Return(&service.ServiceGetOut{State: service.ServiceStateTypeRunning}, nil).Once()
+
+	h := &genericServiceHandler{
+		fabric: newKafkaConnectAdapter,
+		log:    logr.Discard(),
+	}
+
+	secret, err := h.get(t.Context(), avn, kafkaConnect)
+	require.NoError(t, err)
+	require.Nil(t, secret)
+	require.True(t, hasIsRunningAnnotation(kafkaConnect))
+	require.True(t, IsMarkedAsPoweredOn(kafkaConnect))
+	require.True(t, meta.IsStatusConditionTrue(kafkaConnect.Status.Conditions, conditionTypeRunning))
 }
 
 func TestHasPendingMigration(t *testing.T) {

@@ -231,6 +231,16 @@ func GetIsRunningAnnotation(o client.Object) string {
 	return o.GetAnnotations()[instanceIsRunningAnnotation]
 }
 
+// IsMarkedAsPoweredOff returns true when the running annotation explicitly marks a service as powered off.
+func IsMarkedAsPoweredOff(o client.Object) bool {
+	return GetIsRunningAnnotation(o) == "false"
+}
+
+// IsMarkedAsPoweredOn returns true when the running annotation explicitly marks a resource as running.
+func IsMarkedAsPoweredOn(o client.Object) bool {
+	return GetIsRunningAnnotation(o) == "true"
+}
+
 // IsReadyToUse returns true when the client.Object's controller has processed the latest manifest changes
 // and the resource is in a running state in Aiven. For services, this includes both running and powered-off states.
 // This indicates the resource is ready for use and has reached its desired state.
@@ -283,14 +293,10 @@ type objWithSecret interface {
 func newSecret(o objWithSecret, stringData map[string]string, addPrefix bool) *corev1.Secret {
 	target := o.GetConnInfoSecretTarget()
 	meta := metav1.ObjectMeta{
-		Name:        o.GetName(),
+		Name:        connectionSecretName(o),
 		Namespace:   o.GetNamespace(),
 		Annotations: target.Annotations,
 		Labels:      target.Labels,
-	}
-
-	if target.Name != "" {
-		meta.Name = target.Name
 	}
 
 	// fixme: set this as default behaviour
@@ -307,6 +313,13 @@ func newSecret(o objWithSecret, stringData map[string]string, addPrefix bool) *c
 		ObjectMeta: meta,
 		StringData: stringData,
 	}
+}
+
+func connectionSecretName(o objWithSecret) string {
+	if target := o.GetConnInfoSecretTarget(); target.Name != "" {
+		return target.Name
+	}
+	return o.GetName()
 }
 
 // getSecretPrefix returns user's prefix or kind name

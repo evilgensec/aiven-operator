@@ -113,6 +113,17 @@ data:
 				},
 				expected: []string{"new-nested-value"},
 			},
+			{
+				name: "should_update_key_with_dot",
+				yamlContent: `
+data:
+  config:
+    connection.url: old-url`,
+				replacements: map[string]string{
+					"data.config.'connection.url'": "new-url",
+				},
+				expected: []string{"new-url"},
+			},
 		},
 		"removal_operations": {
 			{

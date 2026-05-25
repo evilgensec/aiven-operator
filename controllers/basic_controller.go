@@ -13,6 +13,7 @@ import (
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -191,7 +192,7 @@ func (i *instanceReconcilerHelper) reconcile(ctx context.Context, o v1alpha1.Aiv
 		return false, nil
 	}
 
-	if IsReadyToUse(o) && !hasPendingMigration(o) {
+	if IsReadyToUse(o) && !hasPendingMigration(o) && !i.resourceNeedsConnectionSecretSync(ctx, o) {
 		return false, nil
 	}
 
@@ -325,6 +326,34 @@ func (i *instanceReconcilerHelper) reconcileInstance(ctx context.Context, o v1al
 func hasPendingMigration(o v1alpha1.AivenManagedObject) bool {
 	cond := meta.FindStatusCondition(*o.Conditions(), v1alpha1.ConditionTypeMigrationComplete)
 	return cond != nil && cond.Reason == v1alpha1.MigrationReasonInProgress
+}
+
+func (i *instanceReconcilerHelper) resourceNeedsConnectionSecretSync(ctx context.Context, o v1alpha1.AivenManagedObject) bool {
+	if IsMarkedAsPoweredOff(o) {
+		return false
+	}
+
+	withSecret, ok := connectionSecretOwner(o)
+	if !ok {
+		return false
+	}
+
+	if hasConnectionSecretPublishError(o) {
+		return true
+	}
+
+	secret := &corev1.Secret{}
+	if err := i.k8s.Get(ctx, types.NamespacedName{Name: connectionSecretName(withSecret), Namespace: withSecret.GetNamespace()}, secret); err != nil {
+		if !apierrors.IsNotFound(err) {
+			i.log.Info("unable to verify connection secret ownership", "error", err)
+		}
+		return true
+	}
+
+	// Don't treat a same-named Secret as fresh connection details unless it was published for this exact object.
+	// Otherwise a Secret left behind by a resource deleted and recreated quickly could make the new resource look Ready too early.
+	ref := metav1.GetControllerOf(secret)
+	return ref == nil || o.GetUID() == "" || ref.UID != o.GetUID()
 }
 
 func (i *instanceReconcilerHelper) checkPreconditions(ctx context.Context, o client.Object, refs []client.Object) (bool, error) {
@@ -555,11 +584,18 @@ func (i *instanceReconcilerHelper) updateInstanceStateAndSecretUntilRunning(ctx 
 	goalSecret, err := i.h.get(ctx, i.avnGen, o)
 
 	if goalSecret == nil || err != nil {
+		if err != nil && goalSecret != nil {
+			markConnectionSecretPublishFailed(o, err)
+		}
+		if err == nil && hasIsRunningAnnotation(o) {
+			clearConnectionSecretPublishError(o)
+		}
 		return err
 	}
 
 	if o.NoSecret() {
 		i.rec.Event(o, corev1.EventTypeNormal, eventConnInfoSecretCreationDisabled, "connInfoSecretTargetDisabled is true, secret will not be created")
+		clearConnectionSecretPublishError(o)
 		return nil
 	}
 
@@ -590,8 +626,47 @@ func (i *instanceReconcilerHelper) updateInstanceStateAndSecretUntilRunning(ctx 
 
 		return controllerutil.SetControllerReference(o, secret, i.k8s.Scheme())
 	})
+	if err != nil {
+		markConnectionSecretPublishFailed(o, err)
+		return err
+	}
 
-	return err
+	clearConnectionSecretPublishError(o)
+	return nil
+}
+
+func connectionSecretOwner(o v1alpha1.AivenManagedObject) (objWithSecret, bool) {
+	if o.NoSecret() {
+		return nil, false
+	}
+
+	withSecret, ok := any(o).(objWithSecret)
+	return withSecret, ok
+}
+
+func hasConnectionSecretPublishError(o v1alpha1.AivenManagedObject) bool {
+	cond := meta.FindStatusCondition(*o.Conditions(), ConditionTypeError)
+	return cond != nil && cond.Reason == string(errConditionConnInfoSecret)
+}
+
+func markConnectionSecretPublishFailed(o v1alpha1.AivenManagedObject, err error) {
+	if _, ok := connectionSecretOwner(o); !ok {
+		return
+	}
+
+	delete(o.GetAnnotations(), instanceIsRunningAnnotation)
+	meta.SetStatusCondition(o.Conditions(), getRunningCondition(
+		metav1.ConditionUnknown,
+		string(errConditionConnInfoSecret),
+		"Connection details are not published",
+	))
+	meta.SetStatusCondition(o.Conditions(), getErrorCondition(errConditionConnInfoSecret, err))
+}
+
+func clearConnectionSecretPublishError(o v1alpha1.AivenManagedObject) {
+	if hasConnectionSecretPublishError(o) {
+		meta.RemoveStatusCondition(o.Conditions(), ConditionTypeError)
+	}
 }
 
 func setupLogger(log logr.Logger, o client.Object) logr.Logger {

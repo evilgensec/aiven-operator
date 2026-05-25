@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -123,6 +124,36 @@ func TestKafkaSchemaReconciler(t *testing.T) {
 		require.Equal(t, 1, got.Status.Version, "Status.Version must be the version that holds the freshly-written id")
 		require.Equal(t, fingerprintSchema(schema, nil), got.Annotations[kafkaSchemaAppliedFingerprintAnnotation],
 			"applySchema must record the applied fingerprint so the next Observe sees no drift")
+	})
+
+	t.Run("Requeues when freshly posted schema is not visible yet", func(t *testing.T) {
+		schema := newObjectFromYAML[v1alpha1.KafkaSchema](t, yamlKafkaSchema)
+		schema.Generation = 1
+
+		avn := avngen.NewMockClient(t)
+		avn.EXPECT().
+			ServiceGet(mock.Anything, schema.Spec.Project, schema.Spec.ServiceName, mock.Anything).
+			Return(runningService(), nil).Once()
+		avn.EXPECT().
+			ServiceSchemaRegistrySubjectVersionsGet(mock.Anything, schema.Spec.Project, schema.Spec.ServiceName, schema.Spec.SubjectName).
+			Return(nil, newAivenError(404, "not found")).Once()
+		avn.EXPECT().
+			ServiceSchemaRegistrySubjectVersionPost(
+				mock.Anything, schema.Spec.Project, schema.Spec.ServiceName, schema.Spec.SubjectName, mock.Anything,
+			).Return(42, nil).Once()
+		avn.EXPECT().
+			ServiceSchemaRegistrySubjectVersionsGet(mock.Anything, schema.Spec.Project, schema.Spec.ServiceName, schema.Spec.SubjectName).
+			Return(nil, newAivenError(404, "not found")).Once()
+
+		r, res, err := runKafkaSchemaScenario(t, schema, avn)
+		require.NoError(t, err)
+		require.Equal(t, ctrlruntime.Result{RequeueAfter: requeueTimeout}, res)
+
+		got := &v1alpha1.KafkaSchema{}
+		require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: schema.Name, Namespace: schema.Namespace}, got))
+		require.NotContains(t, got.Annotations, processedGenerationAnnotation)
+		require.NotContains(t, got.Annotations, kafkaSchemaAppliedFingerprintAnnotation)
+		require.Nil(t, meta.FindStatusCondition(got.Status.Conditions, ConditionTypeError))
 	})
 
 	t.Run("Creates KafkaSchema with compatibility level", func(t *testing.T) {

@@ -86,7 +86,7 @@ func TestCreateUpdateService(t *testing.T) {
 	// Waits kube objects
 	pg := new(v1alpha1.PostgreSQL)
 	require.NoError(t, s.GetRunning(pg, pgName))
-	assert.Equal(t, "true", controllers.GetIsRunningAnnotation(pg))
+	assert.True(t, controllers.IsMarkedAsPoweredOn(pg))
 
 	// THEN
 	// Validates tags
@@ -130,7 +130,7 @@ func TestCreateUpdateService(t *testing.T) {
 	avnPgPoweredOff, err := avnGen.ServiceGet(ctx, cfg.Project, pgName)
 	require.NoError(t, err)
 	assert.Equal(t, service.ServiceStateTypePoweroff, avnPgPoweredOff.State)
-	assert.Equal(t, "false", controllers.GetIsRunningAnnotation(pgPoweredOff))
+	assert.True(t, controllers.IsMarkedAsPoweredOff(pgPoweredOff))
 
 	// Validates the service is powered on
 	ymlPowerOn := getUpdateServiceYaml(cfg.Project, pgName, true)
@@ -142,7 +142,7 @@ func TestCreateUpdateService(t *testing.T) {
 	avnPgPoweredOn, err := avnGen.ServiceGet(ctx, cfg.Project, pgName)
 	require.NoError(t, err)
 	assert.Equal(t, service.ServiceStateTypeRunning, avnPgPoweredOn.State)
-	assert.Equal(t, "true", controllers.GetIsRunningAnnotation(pgPoweredOn))
+	assert.True(t, controllers.IsMarkedAsPoweredOn(pgPoweredOn))
 }
 
 // TestTerminationProtectionDeletion verifies that the controller can delete a service
